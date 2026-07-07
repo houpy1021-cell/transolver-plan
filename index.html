@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>基于 Transolver 的二维流道压力场预测方案</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2933;
+      --muted: #5f6b7a;
+      --line: #d8dee8;
+      --code-bg: #f4f7fb;
+      --accent: #246b6b;
+    }
+    body {
+      margin: 0;
+      font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+      line-height: 1.7;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 44px 28px 72px;
+    }
+    h1 {
+      margin: 0 0 24px;
+      padding-bottom: 18px;
+      border-bottom: 2px solid var(--accent);
+      font-size: 2rem;
+      line-height: 1.25;
+    }
+    h2 {
+      margin-top: 34px;
+      padding-top: 8px;
+      font-size: 1.35rem;
+      color: var(--accent);
+    }
+    h3 {
+      margin-top: 26px;
+      font-size: 1.08rem;
+    }
+    p {
+      margin: 12px 0;
+    }
+    ul {
+      margin: 8px 0 8px 22px;
+      padding: 0;
+    }
+    code {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      background: var(--code-bg);
+      border-radius: 4px;
+      padding: 0.08em 0.32em;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      margin: 14px 0;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--code-bg);
+      line-height: 1.5;
+    }
+    pre code {
+      padding: 0;
+      background: transparent;
+      border-radius: 0;
+      white-space: pre;
+    }
+    @media print {
+      main { max-width: none; padding: 18mm; }
+      pre { white-space: pre-wrap; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>基于 Transolver 的二维流道压力场预测方案</h1><h2>1. 问题定义</h2><p>本阶段先考虑二维流道中的压力场预测问题。目标是建立一个数据驱动的算子模型，使其能够根据入口边界流动信息和流道几何边界信息，预测流道内部任意查询点处的压力。</p><p>数学形式可以写成：</p><pre><code>p_i = F_theta(B_inlet, G_wall, x_i, y_i)</code></pre><p>其中：</p><pre><code>B_inlet = 入口边界点云
+G_wall  = 流道几何边界点云
+(x_i, y_i) = 内部查询点坐标
+p_i = 查询点处的压力</code></pre><p>也就是说，模型学习的是：</p><pre><code>入口边界条件 + 几何边界 -&gt; 内部压力场</code></pre><p>而不是简单的点到点插值。</p><h2>2. 数据形式</h2><h3>2.1 入口点云</h3><p>入口处取 <code>m</code> 个点，每个点包含坐标和入口流动状态。</p><p>第一版建议使用：</p><pre><code>inlet point = (x, y, p, T, u, v)</code></pre><p>其中：</p><pre><code>x, y = 入口点坐标
+p    = 入口静压或给定压力
+T    = 入口温度
+u, v = 二维速度分量</code></pre><p>如果目前只有速度大小，也可以先写成：</p><pre><code>inlet point = (x, y, p, T, V)</code></pre><p>但从物理上看，速度分量 <code>(u, v)</code> 比速度大小 <code>V</code> 更好，因为它保留了流动方向信息。</p><p>入口点云整体形状：</p><pre><code>B_inlet in R^{m x 6}</code></pre><h3>2.2 边界点云</h3><p>流道边界取 <code>n</code> 个点，每个点描述几何边界的位置和方向。</p><p>建议使用：</p><pre><code>wall point = (x, y, nx, ny)</code></pre><p>其中：</p><pre><code>x, y   = 边界点坐标
+nx, ny = 边界单位法向量</code></pre><p>这里建议使用 <code>nx, ny</code> 这个命名，而不是 <code>partial_x, partial_y</code>，因为后者容易被理解成偏导数。边界法向量可以帮助模型理解壁面的朝向，也方便后续加入无穿透等物理约束。</p><p>边界点云整体形状：</p><pre><code>G_wall in R^{n x 4}</code></pre><h3>2.3 内部查询点</h3><p>内部取 <code>q</code> 个查询点。查询点不是输出真值，而是告诉模型需要在哪些位置预测压力。</p><p>基础形式：</p><pre><code>query point = (x, y)</code></pre><p>查询点整体形状：</p><pre><code>X_query in R^{q x 2}</code></pre><h3>2.4 输出</h3><p>第一阶段只预测压力：</p><pre><code>P_query in R^{q x 1}</code></pre><p>即：</p><pre><code>每个内部查询点输出一个压力值 p</code></pre><h2>3. 为什么查询点也要作为输入</h2><p>模型需要预测的是连续空间场：</p><pre><code>p = p(x, y)</code></pre><p>如果只输入入口点云和边界点云，模型不知道应该在哪些位置输出压力，也不知道输出点的数量和空间分布。因此查询点坐标 <code>(x, y)</code> 必须作为输入。</p><p>这里输入查询点并不是把输出压力提前告诉模型。模型输入的是：</p><pre><code>query token = (x, y)</code></pre><p>模型输出的是：</p><pre><code>p</code></pre><p>所以没有信息泄漏。查询点只是问题的位置，压力才是答案。</p><h2>4. 总体实验路线</h2><p>建议按照逐步增强的方式开展实验：</p><pre><code>V1: 基础 Transolver
+V2: Transolver + cross attention
+V3: Transolver + cross attention + 物理信息嵌入</code></pre><p>这样可以清楚比较每个模块的贡献，而不是一开始把所有设计全部堆进去。</p><h2>5. V1: 基础 Transolver</h2><h3>5.1 设计目的</h3><p>第一版目标是验证 Transolver 能否作为主干模型，学习：</p><pre><code>入口边界条件 + 几何边界 + 查询点坐标 -&gt; 查询点压力</code></pre><p>这一版不显式加入 cross attention，也不加入复杂物理约束，重点是先跑通基础框架。</p><h3>5.2 Token 设计</h3><p>由于入口点、边界点和查询点的原始特征维度不同，需要先通过不同的 embedding 层投影到统一隐藏维度 <code>d_model</code>。</p><pre><code>inlet_tokens = MLP_inlet(x, y, p, T, u, v)
+wall_tokens  = MLP_wall(x, y, nx, ny)
+query_tokens = MLP_query(x, y)</code></pre><p>对应形状：</p><pre><code>inlet_tokens in R^{m x d_model}
+wall_tokens  in R^{n x d_model}
+query_tokens in R^{q x d_model}</code></pre><p>为了让模型区分不同 token 的来源，加入 type embedding：</p><pre><code>inlet_tokens = inlet_tokens + type_inlet
+wall_tokens  = wall_tokens  + type_wall
+query_tokens = query_tokens + type_query</code></pre><p>然后在 token 维度拼接：</p><pre><code>all_tokens = concat(inlet_tokens, wall_tokens, query_tokens)</code></pre><p>形状为：</p><pre><code>all_tokens in R^{(m+n+q) x d_model}</code></pre><h3>5.3 模型流程</h3><pre><code>B_inlet  -&gt; MLP_inlet  -&gt; inlet tokens
+G_wall   -&gt; MLP_wall   -&gt; wall tokens
+X_query  -&gt; MLP_query  -&gt; query tokens
+
+inlet tokens + wall tokens + query tokens
+        -&gt; concat
+        -&gt; Transolver backbone
+        -&gt; take query tokens only
+        -&gt; MLP head
+        -&gt; predicted pressure</code></pre><h3>5.4 损失函数</h3><p>基础版只对查询点压力计算监督损失：</p><pre><code>L_data = MSE(p_pred, p_true)</code></pre><p>只取 query tokens 的输出参与损失计算，入口 token 和边界 token 不参与压力预测损失。</p><h2>6. V2: Transolver + Cross Attention</h2><h3>6.1 加入 Cross Attention 的原因</h3><p>基础 Transolver 中，入口、边界和查询点是直接拼接后共同混合的。这样虽然可以交互，但“谁向谁取信息”的结构不够明确。</p><p>本问题本质上是：</p><pre><code>内部查询点从入口边界和几何边界中提取信息</code></pre><p>因此可以引入 cross attention，使模型结构更加符合物理问题：</p><pre><code>query = 内部待预测点
+context = 入口点云 + 边界点云</code></pre><h3>6.2 Token 设计</h3><p>仍然先分别 embedding：</p><pre><code>inlet_tokens = MLP_inlet(x, y, p, T, u, v) + type_inlet
+wall_tokens  = MLP_wall(x, y, nx, ny)       + type_wall
+query_tokens = MLP_query(x, y)              + type_query</code></pre><p>将入口 token 和边界 token 拼成 context：</p><pre><code>context_tokens = concat(inlet_tokens, wall_tokens)</code></pre><p>形状：</p><pre><code>context_tokens in R^{(m+n) x d_model}
+query_tokens   in R^{q x d_model}</code></pre><h3>6.3 Cross Attention 关系</h3><p>cross attention 中：</p><pre><code>Q = query_tokens
+K = context_tokens
+V = context_tokens</code></pre><p>含义是：</p><pre><code>每个内部查询点，根据自己的空间位置，从入口点和边界点中选择性提取有用信息。</code></pre><p>输出仍然对应查询点：</p><pre><code>query_tokens_updated in R^{q x d_model}</code></pre><h3>6.4 模型流程</h3><pre><code>B_inlet -&gt; MLP_inlet -&gt; inlet tokens
+G_wall  -&gt; MLP_wall  -&gt; wall tokens
+X_query -&gt; MLP_query -&gt; query tokens
+
+inlet tokens + wall tokens
+        -&gt; concat
+        -&gt; context tokens
+
+query tokens attend to context tokens
+        -&gt; cross attention
+        -&gt; updated query tokens
+        -&gt; Transolver blocks
+        -&gt; MLP head
+        -&gt; predicted pressure</code></pre><p>也可以先对 context 做若干 Transolver block，再让 query cross-attend：</p><pre><code>context tokens -&gt; Transolver encoder -&gt; encoded context
+query tokens cross-attend encoded context
+query tokens -&gt; Transolver decoder -&gt; pressure</code></pre><h3>6.5 预期优势</h3><p>相比 V1，V2 的结构更明确：</p><pre><code>入口点和边界点负责提供条件信息
+查询点负责提出预测位置
+cross attention 负责边界到内部的信息映射
+Transolver 负责空间 token 之间的场信息传播</code></pre><h2>7. V3: 加入物理信息嵌入</h2><h3>7.1 设计原则</h3><p>这一阶段不采用完整 PINN，不直接加入 Navier-Stokes 残差。先采用更稳定的物理信息嵌入方式：</p><pre><code>1. 物理特征输入
+2. 无量纲化变量
+3. 几何相关辅助量
+4. 轻量物理约束</code></pre><p>这样可以让模型从纯数据驱动变成 physics-embedded data-driven model，同时避免 PINN 训练困难的问题。</p><h3>7.2 入口 token 的物理增强</h3><p>基础入口特征：</p><pre><code>(x, y, p, T, u, v)</code></pre><p>物理增强后可以使用：</p><pre><code>(x_norm, y_norm, p_norm, T_norm, u_norm, v_norm, Mach)</code></pre><p>其中：</p><pre><code>Mach = sqrt(u^2 + v^2) / a
+a = sqrt(gamma * R * T)</code></pre><p>如果暂时没有完整热物性，也可以先用速度无量纲量替代 Mach。</p><h3>7.3 边界 token 的物理增强</h3><p>基础边界特征：</p><pre><code>(x, y, nx, ny)</code></pre><p>增强后：</p><pre><code>(x_norm, y_norm, nx, ny, wall_type)</code></pre><p>其中：</p><pre><code>wall_type = 边界类型标识</code></pre><p>例如：</p><pre><code>0 = lower wall / hub
+1 = upper wall / casing</code></pre><p>如果后续有入口、出口边界，也可以继续扩展。</p><h3>7.4 查询 token 的物理增强</h3><p>基础查询特征：</p><pre><code>(x, y)</code></pre><p>增强后建议使用：</p><pre><code>(x_norm, y_norm, d_wall_norm, eta, A_ratio)</code></pre><p>其中：</p><pre><code>d_wall = 查询点到最近壁面的距离
+eta = d_lower / (d_lower + d_upper)
+A_ratio = H(x) / H_in</code></pre><p>含义：</p><pre><code>d_wall 反映查询点离壁面的距离
+eta 反映查询点在上下壁面之间的相对高度
+A_ratio 反映局部流道高度或面积相对入口的变化</code></pre><p>这些特征不属于 PINN，但它们具有明确物理意义，可以帮助模型理解变几何流道中的空间位置。</p><h3>7.5 输出变量的物理化</h3><p>不建议直接预测原始压力数值，可以先预测无量纲压力，例如：</p><pre><code>p_norm = (p - p_ref) / p_scale</code></pre><p>或者压力系数：</p><pre><code>Cp = (p - p_ref) / (0.5 * rho_ref * V_ref^2)</code></pre><p>第一版可以采用更简单稳定的形式：</p><pre><code>p_norm = (p - mean(p_train)) / std(p_train)</code></pre><p>后续再替换成基于入口参考状态的物理无量纲形式。</p><h3>7.6 轻量物理损失</h3><p>如果后续希望进一步加强物理约束，但又不想做 PINN，可以加入轻量物理 loss：</p><pre><code>L = L_data + lambda_wall * L_wall + lambda_inlet * L_inlet</code></pre><p>其中：</p><pre><code>L_data = 查询点压力监督损失
+L_inlet = 入口附近预测压力与入口给定压力的一致性</code></pre><p>如果模型后续预测速度场，可以加入壁面无穿透：</p><pre><code>L_wall = ||V dot n||^2</code></pre><p>但当前只预测压力时，暂时不加入速度相关的壁面损失。</p><h2>8. 推荐实施顺序</h2><h3>阶段 1: 跑通基础 Transolver</h3><p>输入：</p><pre><code>inlet: (x, y, p, T, u, v)
+wall:  (x, y, nx, ny)
+query: (x, y)</code></pre><p>输出：</p><pre><code>p</code></pre><p>模型：</p><pre><code>三类 token 分别 embedding -&gt; concat -&gt; Transolver -&gt; query head -&gt; p</code></pre><p>目的：</p><pre><code>验证 Transolver 主干是否能学习基本压力场映射。</code></pre><h3>阶段 2: 加入 Cross Attention</h3><p>输入不变。</p><p>模型：</p><pre><code>入口 token + 边界 token -&gt; context
+查询点 token -&gt; query
+query cross-attend context
+Transolver 继续处理 query tokens
+MLP head 输出压力</code></pre><p>目的：</p><pre><code>显式建模边界条件和几何信息到内部查询点的传递。</code></pre><h3>阶段 3: 加入物理信息嵌入</h3><p>输入增强为：</p><pre><code>inlet: (x_norm, y_norm, p_norm, T_norm, u_norm, v_norm, Mach)
+wall:  (x_norm, y_norm, nx, ny, wall_type)
+query: (x_norm, y_norm, d_wall_norm, eta, A_ratio)</code></pre><p>输出：</p><pre><code>p_norm 或 Cp</code></pre><p>目的：</p><pre><code>通过物理特征和无量纲化提高模型泛化能力，同时避免完整 PINN 的训练复杂度。</code></pre><h2>9. 方案总结</h2><p>本方案将二维流道压力预测问题建模为点云算子学习问题。入口边界点云提供流动条件，壁面边界点云提供几何信息，内部查询点提供预测位置。基础 Transolver 用于建立点云 token 之间的全局信息传播；cross attention 用于显式表达内部查询点从入口和边界 context 中提取信息；物理信息嵌入则通过无量纲化、法向量、距壁距离、相对通道位置和面积比等特征，将工程物理先验融入数据驱动模型。</p><p>推荐从最简单的基础 Transolver 开始，逐步加入 cross attention 和物理信息嵌入，通过消融实验比较不同模块的贡献。</p>
+  </main>
+</body>
+</html>
